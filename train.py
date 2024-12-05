@@ -76,7 +76,7 @@ def train(rank, a, h):
     trainset = MelDataset(training_filelist, h.segment_size, h.n_fft, h.num_mels,
                           h.hop_size, h.win_size, h.sampling_rate, h.fmin, h.fmax, n_cache_reuse=0,
                           shuffle=False if h.num_gpus > 1 else True, fmax_loss=h.fmax_for_loss, device=device,
-                          fine_tuning=a.fine_tuning, base_mels_path=a.input_mels_dir)
+                          fine_tuning=a.fine_tuning, base_mels_path=a.input_mels_dir, train_from_npy=a.train_from_npy)
 
     train_sampler = DistributedSampler(trainset) if h.num_gpus > 1 else None
 
@@ -90,7 +90,7 @@ def train(rank, a, h):
         validset = MelDataset(validation_filelist, h.segment_size, h.n_fft, h.num_mels,
                               h.hop_size, h.win_size, h.sampling_rate, h.fmin, h.fmax, False, False, n_cache_reuse=0,
                               fmax_loss=h.fmax_for_loss, device=device, fine_tuning=a.fine_tuning,
-                              base_mels_path=a.input_mels_dir)
+                              base_mels_path=a.input_mels_dir, train_from_npy=a.train_from_npy)
         validation_loader = DataLoader(validset, num_workers=1, shuffle=False,
                                        sampler=None,
                                        batch_size=1,
@@ -102,6 +102,8 @@ def train(rank, a, h):
     generator.train()
     mpd.train()
     msd.train()
+
+    print(f'Starting the training process on device {device}...')
     for epoch in range(max(0, last_epoch), a.training_epochs):
         if rank == 0:
             start = time.time()
@@ -111,10 +113,12 @@ def train(rank, a, h):
             train_sampler.set_epoch(epoch)
 
         for i, batch in enumerate(train_loader):
+
+            #print(f"  Batch {i + 1} / {len(train_loader)}")
             if rank == 0:
                 start_b = time.time()
             x, y, _, y_mel = batch
-            x = torch.autograd.Variable(x.to(device, non_blocking=True))
+            x = torch.autograd.Variable(x.to(device, non_blocking=True).float())
             y = torch.autograd.Variable(y.to(device, non_blocking=True))
             y_mel = torch.autograd.Variable(y_mel.to(device, non_blocking=True))
             y = y.unsqueeze(1)
@@ -140,6 +144,9 @@ def train(rank, a, h):
 
             # Generator
             optim_g.zero_grad()
+
+            #print("y_mel shape:", y_mel.shape)
+            #print("y_g_hat_mel shape:", y_g_hat_mel.shape)
 
             # L1 Mel-Spectrogram Loss
             loss_mel = F.l1_loss(y_mel, y_g_hat_mel) * 45
@@ -190,18 +197,37 @@ def train(rank, a, h):
                     val_err_tot = 0
                     with torch.no_grad():
                         for j, batch in enumerate(validation_loader):
+                            print(f"  Validation Batch {j + 1} / {len(validation_loader)}")
                             x, y, _, y_mel = batch
-                            y_g_hat = generator(x.to(device))
+                            x = x.to(device).float()
+                            y_g_hat = generator(x)
                             y_mel = torch.autograd.Variable(y_mel.to(device, non_blocking=True))
                             y_g_hat_mel = mel_spectrogram(y_g_hat.squeeze(1), h.n_fft, h.num_mels, h.sampling_rate,
                                                           h.hop_size, h.win_size,
                                                           h.fmin, h.fmax_for_loss)
+                            # if y_mel.size(2) < y_g_hat_mel.size(2):
+                            #     y_mel = F.pad(y_mel, (0, y_g_hat_mel.size(2) - y_mel.size(2)), mode='replicate')
+                            print("y_mel shape:", y_mel.shape, "y_g_hat_mel shape:", y_g_hat_mel.shape)
+
+                            # Ensure y_g_hat_mel has a batch dimension
+                            if y_g_hat_mel.dim() == 2:
+                                y_g_hat_mel = y_g_hat_mel.unsqueeze(0)
+
+                            # Adjust the time dimension to match if needed
+                            if y_mel.size(2) < y_g_hat_mel.size(2):
+                                y_mel = F.pad(y_mel, (0, y_g_hat_mel.size(2) - y_mel.size(2)), mode='replicate')
+                            elif y_mel.size(2) > y_g_hat_mel.size(2):
+                                y_mel = y_mel[:, :, :y_g_hat_mel.size(2)]
+
+                            # Ensure y_mel and y_g_hat_mel now match in shape before computing loss
+                            print("Adjusted y_mel shape:", y_mel.shape, "Adjusted y_g_hat_mel shape:", y_g_hat_mel.shape)
+
                             val_err_tot += F.l1_loss(y_mel, y_g_hat_mel).item()
 
                             if j <= 4:
                                 if steps == 0:
                                     sw.add_audio('gt/y_{}'.format(j), y[0], steps, h.sampling_rate)
-                                    sw.add_figure('gt/y_spec_{}'.format(j), plot_spectrogram(x[0]), steps)
+                                    sw.add_figure('gt/y_spec_{}'.format(j), plot_spectrogram(x[0].cpu()), steps)
 
                                 sw.add_audio('generated/y_hat_{}'.format(j), y_g_hat[0], steps, h.sampling_rate)
                                 y_hat_spec = mel_spectrogram(y_g_hat.squeeze(1), h.n_fft, h.num_mels,
@@ -234,7 +260,7 @@ def main():
     parser.add_argument('--input_mels_dir', default='ft_dataset')
     parser.add_argument('--input_training_file', default='LJSpeech-1.1/training.txt')
     parser.add_argument('--input_validation_file', default='LJSpeech-1.1/validation.txt')
-    parser.add_argument('--checkpoint_path', default='cp_hifigan')
+    parser.add_argument('--checkpoint_path', default='cp_hifigan_256_2')
     parser.add_argument('--config', default='')
     parser.add_argument('--training_epochs', default=3100, type=int)
     parser.add_argument('--stdout_interval', default=5, type=int)
@@ -242,6 +268,7 @@ def main():
     parser.add_argument('--summary_interval', default=100, type=int)
     parser.add_argument('--validation_interval', default=1000, type=int)
     parser.add_argument('--fine_tuning', default=False, type=bool)
+    parser.add_argument('--train_from_npy', default=False, type=bool)
 
     a = parser.parse_args()
 

@@ -51,7 +51,9 @@ def inference(a):
             wav, sr = load_wav(os.path.join(a.input_wavs_dir, filname))
             wav = wav / MAX_WAV_VALUE
             wav = torch.FloatTensor(wav).to(device)
+            print(wav.unsqueeze(0).shape)
             x = get_mel(wav.unsqueeze(0))
+            print(x.shape)
             y_g_hat = generator(x)
             audio = y_g_hat.squeeze()
             audio = audio * MAX_WAV_VALUE

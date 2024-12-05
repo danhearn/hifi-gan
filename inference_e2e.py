@@ -10,6 +10,7 @@ from scipy.io.wavfile import write
 from env import AttrDict
 from meldataset import MAX_WAV_VALUE
 from models import Generator
+import time
 
 h = None
 device = None
@@ -45,13 +46,20 @@ def inference(a):
     generator.remove_weight_norm()
     with torch.no_grad():
         for i, filname in enumerate(filelist):
+            start = time.time()
             x = np.load(os.path.join(a.input_mels_dir, filname))
+            print(x.shape)
             x = torch.FloatTensor(x).to(device)
+            print(x.shape)
+            #x = x.unsqueeze(0)
+            print(x.shape)
             y_g_hat = generator(x)
             audio = y_g_hat.squeeze()
             audio = audio * MAX_WAV_VALUE
             audio = audio.cpu().numpy().astype('int16')
+            print('Time taken for inference {} is {} sec\n'.format(1, int(time.time() - start)))
 
+            # Save the generated audio to a file
             output_file = os.path.join(a.output_dir, os.path.splitext(filname)[0] + '_generated_e2e.wav')
             write(output_file, h.sampling_rate, audio)
             print(output_file)

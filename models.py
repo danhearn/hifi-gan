@@ -78,7 +78,7 @@ class Generator(torch.nn.Module):
         self.h = h
         self.num_kernels = len(h.resblock_kernel_sizes)
         self.num_upsamples = len(h.upsample_rates)
-        self.conv_pre = weight_norm(Conv1d(80, h.upsample_initial_channel, 7, 1, padding=3))
+        self.conv_pre = weight_norm(Conv1d(256, h.upsample_initial_channel, 7, 1, padding=3))
         resblock = ResBlock1 if h.resblock == '1' else ResBlock2
 
         self.ups = nn.ModuleList()
@@ -97,11 +97,14 @@ class Generator(torch.nn.Module):
         self.ups.apply(init_weights)
         self.conv_post.apply(init_weights)
 
+
     def forward(self, x):
         x = self.conv_pre(x)
         for i in range(self.num_upsamples):
             x = F.leaky_relu(x, LRELU_SLOPE)
+            #print("After some_layer:", x.shape)
             x = self.ups[i](x)
+            #print("After some_layer:", x.shape)
             xs = None
             for j in range(self.num_kernels):
                 if xs is None:
@@ -109,9 +112,13 @@ class Generator(torch.nn.Module):
                 else:
                     xs += self.resblocks[i*self.num_kernels+j](x)
             x = xs / self.num_kernels
+            #print("After some_layer:", x.shape)
         x = F.leaky_relu(x)
+        #print("After some_layer:", x.shape)
         x = self.conv_post(x)
+        #print("After some_layer:", x.shape)
         x = torch.tanh(x)
+        #print("After some_layer:", x.shape)
 
         return x
 
@@ -252,9 +259,16 @@ def feature_loss(fmap_r, fmap_g):
     loss = 0
     for dr, dg in zip(fmap_r, fmap_g):
         for rl, gl in zip(dr, dg):
+            # Ensure that both feature maps have the same time dimension by slicing
+            min_length = min(rl.shape[2], gl.shape[2])
+            rl = rl[:, :, :min_length]
+            gl = gl[:, :, :min_length]
+            
+            # Calculate the feature map loss
             loss += torch.mean(torch.abs(rl - gl))
 
-    return loss*2
+    return loss * 2
+
 
 
 def discriminator_loss(disc_real_outputs, disc_generated_outputs):
