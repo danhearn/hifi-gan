@@ -46,33 +46,71 @@ mel_basis = {}
 hann_window = {}
 
 
-def mel_spectrogram(y, n_fft, num_mels, sampling_rate, hop_size, win_size, fmin, fmax, center=False):
-    if torch.min(y) < -1.:
-        print('min value is ', torch.min(y))
-    if torch.max(y) > 1.:
-        print('max value is ', torch.max(y))
+def mel_spectrogram(
+    y, n_fft, num_mels, sampling_rate, hop_size, win_size, fmin, fmax, center=False
+):
+    if torch.min(y) < -1.0:
+        print("min value is ", torch.min(y))
+    if torch.max(y) > 1.0:
+        print("max value is ", torch.max(y))
 
     global mel_basis, hann_window
-    if fmax not in mel_basis:
-        mel = librosa_mel_fn(sr=sampling_rate, n_fft=n_fft, n_mels=num_mels, fmin=fmin, fmax=fmax)
-        mel_basis[str(fmax)+'_'+str(y.device)] = torch.from_numpy(mel).float().to(y.device)
-        hann_window[str(y.device)] = torch.hann_window(win_size).to(y.device)
+    dtype_device = str(y.dtype) + "_" + str(y.device)
+    fmax_dtype_device = str(fmax) + "_" + dtype_device
+    wnsize_dtype_device = str(win_size) + "_" + dtype_device
+    if fmax_dtype_device not in mel_basis:
+        mel = librosa_mel_fn(
+            sr=sampling_rate, n_fft=n_fft, n_mels=num_mels, fmin=fmin, fmax=fmax
+        )
+        mel_basis[fmax_dtype_device] = torch.from_numpy(mel).type_as(y)
+    if wnsize_dtype_device not in hann_window:
+        hann_window[wnsize_dtype_device] = torch.hann_window(win_size).type_as(y)
 
-    y = torch.nn.functional.pad(y.unsqueeze(1), (int((n_fft-hop_size)/2), int((n_fft-hop_size)/2)), mode='reflect')
+    # Handle multi-channel audio by converting to mono
+    if y.dim() == 3 and y.shape[-1] == 2:  # Stereo or multi-channel
+        #print("Converting multi-channel audio to mono.")
+        y = y.mean(dim=-1)  # Use mean or select one channel: y = y[..., 0]
+
+    # Ensure y has at least 2 dimensions before padding
+    if y.dim() == 1:
+        y = y.unsqueeze(0)
+
+    # Calculate padding amounts
+    left_pad = (n_fft - hop_size) // 2
+    right_pad = n_fft - hop_size - left_pad
+    #print(f"Padding: left={left_pad}, right={right_pad}")
+
+    # Pad and check
+    try:
+        y = torch.nn.functional.pad(
+            y.unsqueeze(1), (left_pad, right_pad), mode="reflect"
+        )
+    except Exception as e:
+        print(f"Error during padding: {e}")
+        raise
     y = y.squeeze(1)
 
-    spec = torch.stft(y, n_fft, hop_length=hop_size, win_length=win_size, window=hann_window[str(y.device)],
-                      center=center, pad_mode='reflect', normalized=False, return_complex=True, onesided=True)
+    spec = torch.view_as_real(
+        torch.stft(
+            y,
+            n_fft,
+            hop_length=hop_size,
+            win_length=win_size,
+            window=hann_window[wnsize_dtype_device],
+            center=center,
+            pad_mode="reflect",
+            normalized=False,
+            onesided=True,
+            return_complex=True,
+        )
+    )
 
-    # Take the magnitude and remove any extra dimensions
-    spec = torch.abs(spec)  # Converts complex to real
-    spec = spec.squeeze(0) if spec.dim() == 3 else spec  # Ensure shape is (frequency_bins, time_steps)
+    spec = torch.sqrt(spec.pow(2).sum(-1) + 1e-6)
 
-    spec = torch.matmul(mel_basis[str(fmax)+'_'+str(y.device)], spec)
+    spec = torch.matmul(mel_basis[fmax_dtype_device], spec)
     spec = spectral_normalize_torch(spec)
 
     return spec
-
 
 def get_dataset_filelist(a):
     with open(a.input_training_file, 'r', encoding='utf-8') as fi:
